@@ -13,12 +13,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -198,19 +201,14 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	sessionCache *ResponseSessionCache
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
-// It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
-//
-// Parameters:
-//   - apiHandlers: The base API handlers instance
-//
-// Returns:
-//   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
+		sessionCache:   NewResponseSessionCache(30*time.Minute, 50000),
 	}
 }
 
@@ -319,17 +317,53 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
+	prevRespID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
+	wasPinned := false
+	if prevRespID != "" && h.sessionCache != nil {
+		if authID, ok := h.sessionCache.Get(prevRespID); ok {
+			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
+			wasPinned = true
+			log.Infof("responses session-sticky: pinned to %s via %s", authID, prevRespID)
+		}
+	}
+	var selectedAuthID string
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = strings.TrimSpace(authID)
+	})
+
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	stopKeepAlive()
+
+	if errMsg != nil && wasPinned {
+		log.Warnf("responses session-sticky: pinned auth failed (%v), retrying without pin", errMsg.Error)
+		cliCancel(errMsg.Error)
+		cliCtx, cliCancel = h.GetContextWithCancel(h, c, context.Background())
+		selectedAuthID = ""
+		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+			selectedAuthID = strings.TrimSpace(authID)
+		})
+		stopKeepAlive = h.StartNonStreamingKeepAlive(c, cliCtx)
+		resp, upstreamHeaders, errMsg = h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+		stopKeepAlive()
+	}
+
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
+
+	if h.sessionCache != nil && selectedAuthID != "" {
+		if respID := strings.TrimSpace(gjson.GetBytes(resp, "id").String()); respID != "" {
+			h.sessionCache.Set(respID, selectedAuthID)
+			log.Infof("responses session-sticky: cached %s → %s", respID, selectedAuthID)
+		}
+	}
+
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -343,7 +377,6 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
-	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
@@ -355,10 +388,65 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		return
 	}
 
-	// New core execution path
+	prevRespID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+
+	wasPinned := false
+	if prevRespID != "" && h.sessionCache != nil {
+		if authID, ok := h.sessionCache.Get(prevRespID); ok {
+			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
+			wasPinned = true
+			log.Infof("responses session-sticky: pinned to %s via %s", authID, prevRespID)
+		}
+	}
+	var selectedAuthID string
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = strings.TrimSpace(authID)
+	})
+
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+
+	if dataChan == nil && wasPinned {
+		log.Warnf("responses session-sticky: pinned auth failed for stream, retrying without pin")
+		cliCancel(nil)
+		cliCtx, cliCancel = h.GetContextWithCancel(h, c, context.Background())
+		selectedAuthID = ""
+		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+			selectedAuthID = strings.TrimSpace(authID)
+		})
+		dataChan, upstreamHeaders, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	}
+
+	capturedRespID := ""
+	scanChunk := func(chunk []byte) {
+		if capturedRespID != "" {
+			return
+		}
+		for _, line := range bytes.Split(chunk, []byte("\n")) {
+			if !bytes.HasPrefix(line, []byte("data: ")) {
+				continue
+			}
+			data := line[6:]
+			etype := gjson.GetBytes(data, "type").String()
+			if etype != "response.created" && etype != "response.completed" {
+				continue
+			}
+			rid := gjson.GetBytes(data, "response.id").String()
+			if rid == "" {
+				rid = gjson.GetBytes(data, "id").String()
+			}
+			if rid != "" {
+				capturedRespID = rid
+			}
+		}
+	}
+	cacheSession := func() {
+		if capturedRespID != "" && selectedAuthID != "" && h.sessionCache != nil {
+			h.sessionCache.Set(capturedRespID, selectedAuthID)
+			log.Infof("responses session-sticky: cached %s → %s (stream)", capturedRespID, selectedAuthID)
+		}
+	}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -368,7 +456,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 	framer := &responsesSSEFramer{}
 
-	// Peek at the first chunk
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -376,11 +463,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case errMsg, ok := <-errChan:
 			if !ok {
-				// Err channel closed cleanly; wait for data channel.
 				errChan = nil
 				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -390,36 +475,37 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
+				cacheSession()
 				cliCancel(nil)
 				return
 			}
 
-			// Success! Set headers.
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			scanChunk(chunk)
 
-			// Write first chunk logic (matching forwardResponsesStream)
 			framer.WriteChunk(c.Writer, chunk)
 			flusher.Flush()
 
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer, scanChunk, cacheSession)
 			return
 		}
 	}
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer, scanChunk func([]byte), onDone func()) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			if scanChunk != nil {
+				scanChunk(chunk)
+			}
 			framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -441,6 +527,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		WriteDone: func() {
 			framer.Flush(c.Writer)
 			_, _ = c.Writer.Write([]byte("\n"))
+			if onDone != nil {
+				onDone()
+			}
 		},
 	})
 }

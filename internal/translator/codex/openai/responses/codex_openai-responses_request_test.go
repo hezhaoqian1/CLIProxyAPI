@@ -364,3 +364,87 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
+
+func TestStripItemReferencesAndIds_Mixed(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type": "message", "role": "user", "id": "msg_001", "content": [{"type":"input_text","text":"hi"}]},
+			{"type": "item_reference", "id": "rs_abc"},
+			{"type": "message", "role": "assistant", "id": "msg_002", "content": [{"type":"output_text","text":"hello"}]}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	arr := gjson.Get(outputStr, "input").Array()
+	if len(arr) != 2 {
+		t.Fatalf("expected 2 input items after stripping item_reference, got %d", len(arr))
+	}
+	if arr[0].Get("type").String() != "message" || arr[1].Get("type").String() != "message" {
+		t.Errorf("remaining items should both be message type")
+	}
+	if arr[0].Get("id").Exists() {
+		t.Errorf("id should be stripped from first item")
+	}
+	if arr[1].Get("id").Exists() {
+		t.Errorf("id should be stripped from second item")
+	}
+	if arr[0].Get("content.0.text").String() != "hi" {
+		t.Errorf("content should be preserved")
+	}
+}
+
+func TestStripItemReferencesAndIds_OnlyItemReferences(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type": "item_reference", "id": "rs_001"},
+			{"type": "item_reference", "id": "rs_002"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	arr := gjson.Get(outputStr, "input").Array()
+	if len(arr) != 0 {
+		t.Fatalf("expected 0 input items after stripping all item_references, got %d", len(arr))
+	}
+}
+
+func TestStripItemReferencesAndIds_NoInput(t *testing.T) {
+	inputJSON := []byte(`{"model": "gpt-5.2"}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if !gjson.Get(outputStr, "model").Exists() {
+		t.Errorf("model field should still exist")
+	}
+}
+
+func TestStripItemReferencesAndIds_PreservesContentIds(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"id": "msg_encrypted",
+				"content": [{"type":"input_text","text":"tell me about id=42"}]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "input.0.id").Exists() {
+		t.Errorf("top-level id should be stripped")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "tell me about id=42" {
+		t.Errorf("content text should be preserved")
+	}
+}
