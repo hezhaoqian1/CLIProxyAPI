@@ -42,6 +42,8 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
+	rawJSON = stripItemReferencesAndIds(rawJSON)
+
 	return rawJSON
 }
 
@@ -60,6 +62,42 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
 	return rawJSON
+}
+
+// stripItemReferencesAndIds removes item_reference entries from the input array
+// and strips the "id" field from every remaining input item. This prevents
+// 404 errors when the upstream has no knowledge of referenced response IDs.
+func stripItemReferencesAndIds(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	result := rawJSON
+
+	// Collect indices of item_reference entries (reverse order for safe deletion).
+	var removeIndices []int
+	for i := 0; i < len(inputArray); i++ {
+		if gjson.GetBytes(result, fmt.Sprintf("input.%d.type", i)).String() == "item_reference" {
+			removeIndices = append(removeIndices, i)
+		}
+	}
+	for j := len(removeIndices) - 1; j >= 0; j-- {
+		path := fmt.Sprintf("input.%d", removeIndices[j])
+		result, _ = sjson.DeleteBytes(result, path)
+	}
+
+	// Strip "id" from every remaining input item.
+	remaining := gjson.GetBytes(result, "input").Array()
+	for i := 0; i < len(remaining); i++ {
+		idPath := fmt.Sprintf("input.%d.id", i)
+		if gjson.GetBytes(result, idPath).Exists() {
+			result, _ = sjson.DeleteBytes(result, idPath)
+		}
+	}
+
+	return result
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items
