@@ -830,6 +830,14 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	if s.mgmt != nil {
+		shutdownCtx := ctx
+		if shutdownCtx == nil {
+			shutdownCtx = context.Background()
+		}
+		s.mgmt.Close(shutdownCtx)
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)

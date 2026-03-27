@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -48,6 +49,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	banMonitor          *accountBanMonitor
 }
 
 // NewHandler creates a new management handler instance.
@@ -66,6 +68,9 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 	}
 	h.startAttemptCleanup()
+	h.banMonitor = newAccountBanMonitor(h)
+	h.banMonitor.UpdateConfig(cfg)
+	h.banMonitor.Start()
 	return h
 }
 
@@ -105,10 +110,20 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.cfg = cfg
+	if h != nil && h.banMonitor != nil {
+		h.banMonitor.UpdateConfig(cfg)
+	}
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
-func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
+	h.authManager = manager
+	if h != nil && h.banMonitor != nil {
+		h.banMonitor.SetAuthManager(manager)
+	}
+}
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
@@ -132,6 +147,14 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// Close stops background workers owned by the management handler.
+func (h *Handler) Close(ctx context.Context) {
+	if h == nil || h.banMonitor == nil {
+		return
+	}
+	h.banMonitor.Stop(ctx)
 }
 
 // Middleware enforces access control for management endpoints.

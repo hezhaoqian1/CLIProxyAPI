@@ -38,6 +38,9 @@ type Config struct {
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
+	// AccountBanAlert configures CPA-side banned account detection and notifications.
+	AccountBanAlert AccountBanAlertConfig `yaml:"account-ban-alert" json:"account-ban-alert"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
@@ -180,6 +183,27 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// AccountBanAlertConfig controls periodic banned-account probing for Codex auth files.
+// A "ban" is intentionally narrow here: only `wham/usage` responding with HTTP 401 counts.
+type AccountBanAlertConfig struct {
+	// Enabled toggles the background monitor.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// WebhookURL is the Lark custom bot webhook that receives alerts.
+	WebhookURL string `yaml:"webhook-url" json:"webhook-url"`
+	// ScanIntervalSeconds controls how often the background scanner probes accounts.
+	ScanIntervalSeconds int `yaml:"scan-interval-seconds" json:"scan-interval-seconds"`
+	// ProbeTimeoutSeconds controls the per-account HTTP timeout for `wham/usage` probes.
+	ProbeTimeoutSeconds int `yaml:"probe-timeout-seconds" json:"probe-timeout-seconds"`
+	// Parallelism limits concurrent probe requests during one scan.
+	Parallelism int `yaml:"parallelism" json:"parallelism"`
+	// Confirm401Attempts repeats the 401 probe this many total attempts before treating the account as banned.
+	Confirm401Attempts int `yaml:"confirm-401-attempts" json:"confirm-401-attempts"`
+	// Confirm401DelaySeconds waits this many seconds between repeated 401 confirmations.
+	Confirm401DelaySeconds int `yaml:"confirm-401-delay-seconds" json:"confirm-401-delay-seconds"`
+	// DeleteBannedAuth removes the auth file after a successful alert push when true.
+	DeleteBannedAuth bool `yaml:"delete-banned-auth" json:"delete-banned-auth"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -564,6 +588,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.AccountBanAlert.ScanIntervalSeconds = 300
+	cfg.AccountBanAlert.ProbeTimeoutSeconds = 15
+	cfg.AccountBanAlert.Parallelism = 10
+	cfg.AccountBanAlert.Confirm401Attempts = 2
+	cfg.AccountBanAlert.Confirm401DelaySeconds = 3
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -605,6 +634,23 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	}
+
+	cfg.AccountBanAlert.WebhookURL = strings.TrimSpace(cfg.AccountBanAlert.WebhookURL)
+	if cfg.AccountBanAlert.ScanIntervalSeconds <= 0 {
+		cfg.AccountBanAlert.ScanIntervalSeconds = 300
+	}
+	if cfg.AccountBanAlert.ProbeTimeoutSeconds <= 0 {
+		cfg.AccountBanAlert.ProbeTimeoutSeconds = 15
+	}
+	if cfg.AccountBanAlert.Parallelism <= 0 {
+		cfg.AccountBanAlert.Parallelism = 10
+	}
+	if cfg.AccountBanAlert.Confirm401Attempts <= 0 {
+		cfg.AccountBanAlert.Confirm401Attempts = 2
+	}
+	if cfg.AccountBanAlert.Confirm401DelaySeconds < 0 {
+		cfg.AccountBanAlert.Confirm401DelaySeconds = 3
 	}
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
