@@ -32,7 +32,7 @@ remote-management:
 # Only a real `wham/usage` HTTP 401 counts as ban.
 # Quota limit / used_percent / temporary unavailability do not trigger this alert.
 account-ban-alert:
-  enabled: false
+  enabled: true
   webhook-url: ""
   scan-interval-seconds: 300
   probe-timeout-seconds: 15

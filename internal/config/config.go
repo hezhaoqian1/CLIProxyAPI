@@ -588,6 +588,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.AccountBanAlert.Enabled = true
 	cfg.AccountBanAlert.ScanIntervalSeconds = 300
 	cfg.AccountBanAlert.ProbeTimeoutSeconds = 15
 	cfg.AccountBanAlert.Parallelism = 10

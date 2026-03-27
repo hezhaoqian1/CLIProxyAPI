@@ -418,13 +418,18 @@ func (m *accountBanMonitor) clearActiveKey(key string) {
 }
 
 func (m *accountBanMonitor) sendBanAlert(webhookURL string, event accountBanEvent) error {
+	title := "CPA 账号封号告警"
+	return sendLarkInteractiveCard(strings.TrimSpace(webhookURL), title, event.larkContent(), "red")
+}
+
+func sendLarkInteractiveCard(webhookURL, title, content, template string) error {
 	payload := map[string]any{
 		"msg_type": "interactive",
 		"card": map[string]any{
 			"header": map[string]any{
-				"template": "red",
+				"template": firstNonEmptyValue(template, "red"),
 				"title": map[string]any{
-					"content": "CPA 账号封号告警",
+					"content": firstNonEmptyValue(title, "CPA 消息"),
 					"tag":     "plain_text",
 				},
 			},
@@ -433,7 +438,7 @@ func (m *accountBanMonitor) sendBanAlert(webhookURL string, event accountBanEven
 					"tag": "div",
 					"text": map[string]any{
 						"tag":     "lark_md",
-						"content": event.larkContent(),
+						"content": content,
 					},
 				},
 			},

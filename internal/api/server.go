@@ -529,6 +529,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
+		mgmt.GET("/account-ban-alert", s.mgmt.GetAccountBanAlert)
+		mgmt.PUT("/account-ban-alert", s.mgmt.PutAccountBanAlert)
+		mgmt.PATCH("/account-ban-alert", s.mgmt.PutAccountBanAlert)
+		mgmt.POST("/account-ban-alert/test", s.mgmt.PostAccountBanAlertTest)
+
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
