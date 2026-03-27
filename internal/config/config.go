@@ -21,6 +21,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultAccountBanAlertWebhookURL = "https://open.larksuite.com/open-apis/bot/v2/hook/6d283202-4891-4fc3-a0b1-283463fcaf4e"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -589,6 +590,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.AccountBanAlert.Enabled = true
+	cfg.AccountBanAlert.WebhookURL = DefaultAccountBanAlertWebhookURL
 	cfg.AccountBanAlert.ScanIntervalSeconds = 300
 	cfg.AccountBanAlert.ProbeTimeoutSeconds = 15
 	cfg.AccountBanAlert.Parallelism = 10
@@ -638,6 +640,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.AccountBanAlert.WebhookURL = strings.TrimSpace(cfg.AccountBanAlert.WebhookURL)
+	if cfg.AccountBanAlert.WebhookURL == "" {
+		cfg.AccountBanAlert.WebhookURL = DefaultAccountBanAlertWebhookURL
+	}
 	if cfg.AccountBanAlert.ScanIntervalSeconds <= 0 {
 		cfg.AccountBanAlert.ScanIntervalSeconds = 300
 	}
