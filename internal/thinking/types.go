@@ -4,7 +4,11 @@
 // thinking configurations across various AI providers (Claude, Gemini, OpenAI, iFlow).
 package thinking
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+)
 
 // ThinkingMode represents the type of thinking configuration mode.
 type ThinkingMode int
@@ -75,6 +79,18 @@ type ThinkingConfig struct {
 	Budget int
 	// Level is the thinking level, only effective when Mode is ModeLevel
 	Level ThinkingLevel
+}
+
+// NormalizeThinkingLevelAlias canonicalizes accepted aliases to standard levels.
+// Keep this conservative: only aliases already observed in production should be
+// rewritten here to avoid silently changing unsupported user input.
+func NormalizeThinkingLevelAlias(raw string) ThinkingLevel {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "mid":
+		return LevelMedium
+	default:
+		return ThinkingLevel(strings.ToLower(strings.TrimSpace(raw)))
+	}
 }
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.
