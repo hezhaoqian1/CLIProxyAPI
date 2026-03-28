@@ -128,8 +128,7 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 		return "", false
 	}
 
-	// Case-insensitive matching
-	switch strings.ToLower(rawSuffix) {
+	switch NormalizeThinkingLevelAlias(rawSuffix) {
 	case "minimal":
 		return LevelMinimal, true
 	case "low":
