@@ -139,7 +139,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel, requestPath)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -294,7 +295,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel, requestPath)
 
 	projectID := resolveGeminiProjectID(auth)
 
@@ -409,20 +411,33 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					if bytes.HasPrefix(line, dataTag) {
 						segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
 						for i := range segments {
-							out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
+							case <-ctx.Done():
+								return
+							}
 						}
 					}
 				}
 
 				segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
 				for i := range segments {
-					out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+					case <-ctx.Done():
+					}
+					return
 				}
+				reporter.EnsurePublished(ctx)
 				return
 			}
 
@@ -430,7 +445,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 				reporter.PublishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: errRead}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
@@ -438,12 +456,20 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			var param any
 			segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, data, &param)
 			for i := range segments {
-				out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 
 			segments = sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
 			for i := range segments {
-				out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}(httpResp, append([]byte(nil), payload...), attemptModel)
 
@@ -898,7 +924,14 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
 			seconds, err := strconv.Atoi(matches[1])
 			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
+				duration := time.Duration(seconds) * time.Second
+				return &duration, nil
+			}
+		}
+		reHuman := regexp.MustCompile(`after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`)
+		if matches := reHuman.FindStringSubmatch(strings.ToLower(message)); len(matches) > 1 {
+			if duration, err := time.ParseDuration(matches[1]); err == nil && duration > 0 {
+				return &duration, nil
 			}
 		}
 	}
