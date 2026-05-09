@@ -16,6 +16,7 @@ SWITCH_PROJECT_VALUE="${CLIPROXY_SWITCH_PROJECT:-true}"
 SWITCH_PREVIEW_MODEL_VALUE="${CLIPROXY_SWITCH_PREVIEW_MODEL:-false}"
 ROUTING_STRATEGY_VALUE="${CLIPROXY_ROUTING_STRATEGY:-round-robin}"
 DEBUG_VALUE="${CLIPROXY_DEBUG:-false}"
+PANEL_GITHUB_REPOSITORY_VALUE="${CLIPROXY_PANEL_GITHUB_REPOSITORY:-https://github.com/hezhaoqian1/Cli-Proxy-API-Management-Center}"
 AUTO_IMPORT_TOKENS="${CLIPROXY_AUTO_IMPORT_TOKENS:-true}"
 IMPORT_MIN_EXISTING="${CLIPROXY_IMPORT_MIN_EXISTING:-5}"
 ZHUCEJI_URL="${ZHUCEJI_URL:-https://codex-zhuceji.up.railway.app}"
@@ -33,7 +34,7 @@ is_truthy() {
 render_initial_config() {
     export CONFIG_PATH AUTH_DIR PORT_VALUE API_KEYS_VALUE MGMT_KEY_VALUE
     export ALLOW_REMOTE_MANAGEMENT REQUEST_RETRY_VALUE SWITCH_PROJECT_VALUE
-    export SWITCH_PREVIEW_MODEL_VALUE ROUTING_STRATEGY_VALUE DEBUG_VALUE
+    export SWITCH_PREVIEW_MODEL_VALUE ROUTING_STRATEGY_VALUE DEBUG_VALUE PANEL_GITHUB_REPOSITORY_VALUE
     python3 - <<'PY'
 import json
 import os
@@ -74,6 +75,7 @@ switch_preview_model = parse_bool(
     os.environ.get("SWITCH_PREVIEW_MODEL_VALUE", "false")
 )
 debug_enabled = parse_bool(os.environ.get("DEBUG_VALUE", "false"))
+panel_github_repository = os.environ.get("PANEL_GITHUB_REPOSITORY_VALUE", "").strip()
 routing_strategy = os.environ.get("ROUTING_STRATEGY_VALUE", "round-robin").strip()
 if not routing_strategy:
     routing_strategy = "round-robin"
@@ -92,6 +94,7 @@ lines.extend(
         "remote-management:",
         f"  allow-remote: {str(allow_remote).lower()}",
         f"  secret-key: {json.dumps(mgmt_key)}",
+        f"  panel-github-repository: {json.dumps(panel_github_repository)}",
         "",
         f"request-retry: {request_retry}",
         "",
