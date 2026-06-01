@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,11 +12,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -92,6 +93,64 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-1"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	sess := exec.getOrCreateSession(sessionID)
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.authID = "auth-1"
+	sess.wsURL = "ws://example.test/responses"
+	sess.readerConn = conn
+	sess.connMu.Unlock()
+
+	upstreamErr := errors.New("upstream gone")
+	exec.invalidateUpstreamConn(sess, conn, "test_invalidate", upstreamErr)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		if !ok {
+			t.Fatal("expected disconnect channel to deliver error before closing")
+		}
+		if errRead == nil || errRead.Error() != upstreamErr.Error() {
+			t.Fatalf("disconnect error = %v, want %v", errRead, upstreamErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for disconnect signal")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
@@ -104,11 +163,11 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if !strings.HasPrefix(codexUserAgent, codexOriginator+"/") {
 		t.Fatalf("default Codex User-Agent = %s, want prefix %s/", codexUserAgent, codexOriginator)
 	}
-	if strings.HasPrefix(codexUserAgent, "codex-tui/") {
-		t.Fatalf("default Codex User-Agent = %s, must not use stale codex-tui prefix", codexUserAgent)
+	if !strings.HasPrefix(codexUserAgent, "codex-tui/") {
+		t.Fatalf("default Codex User-Agent = %s, want codex-tui prefix", codexUserAgent)
 	}
-	if strings.Contains(codexUserAgent, "(codex-tui;") {
-		t.Fatalf("default Codex User-Agent = %s, must not include stale codex-tui suffix", codexUserAgent)
+	if !strings.Contains(codexUserAgent, "(codex-tui;") {
+		t.Fatalf("default Codex User-Agent = %s, want codex-tui suffix", codexUserAgent)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
@@ -138,7 +197,7 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 		"Version":               "0.115.0-alpha.27",
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
-		"session_id":            "sess-client",
+		"session_id":            "legacy-session",
 	})
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
@@ -158,8 +217,8 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	if got := headers.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
 	}
-	if got := headerValueCaseInsensitive(headers, "session_id"); got != "sess-client" {
-		t.Fatalf("session_id = %s, want sess-client", got)
+	if got := headerValueCaseInsensitive(headers, "session_id"); got != "legacy-session" {
+		t.Fatalf("session_id = %s, want legacy-session", got)
 	}
 	if _, ok := headers["session_id"]; !ok {
 		t.Fatalf("expected lowercase session_id header key, got %#v", headers)
@@ -285,6 +344,23 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 	}
 }
 
+func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+	}
+}
+
 func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 
@@ -301,20 +377,114 @@ func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t
 	}
 }
 
-func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
-	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
-
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
-
-	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
-		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testing.T) {
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{SessionAffinity: true},
+		Codex:   config.CodexConfig{IdentityConfuse: true},
 	}
-	values, ok := headers["ChatGPT-Account-ID"]
-	if !ok {
-		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	auth := &cliproxyauth.Auth{ID: "auth-ws-1", Provider: "codex"}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"prompt_cache_key":"cache-ws-1","client_metadata":{"x-codex-installation-id":"install-ws-1"}}`),
 	}
-	if len(values) != 1 || values[0] != "acct-1" {
-		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+
+	body, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
+	body, identityState := applyCodexIdentityConfuseBody(cfg, auth, req.Payload, body)
+	ctx := contextWithGinHeaders(map[string]string{
+		"X-Codex-Turn-Metadata": `{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1","window_id":"cache-ws-1:0"}`,
+		"X-Client-Request-Id":   "client-request-1",
+	})
+	headers = applyCodexWebsocketHeaders(ctx, headers, auth, "oauth-token", cfg)
+	applyCodexIdentityConfuseHeaders(headers, &identityState)
+
+	expectedPromptCacheKey := codexIdentityConfuseUUID("auth-ws-1", "prompt-cache", "cache-ws-1")
+	expectedTurnID := codexIdentityConfuseUUID("auth-ws-1", "turn", "turn-ws-1")
+	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
+	}
+	if gotSession := headerValueCaseInsensitive(headers, "session_id"); gotSession != expectedPromptCacheKey {
+		t.Fatalf("session_id = %q, want %q", gotSession, expectedPromptCacheKey)
+	}
+	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
+	}
+	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
+		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
+	}
+	if gotConversation := headers.Get("Conversation_id"); gotConversation != expectedPromptCacheKey {
+		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedPromptCacheKey)
+	}
+	if gotWindowID := headers.Get("X-Codex-Window-Id"); gotWindowID != expectedPromptCacheKey+":0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
+	}
+	gotMetadata := headers.Get("X-Codex-Turn-Metadata")
+	if gotMetadataPromptCacheKey := gjson.Get(gotMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
+		t.Fatalf("X-Codex-Turn-Metadata.prompt_cache_key = %q, want %q", gotMetadataPromptCacheKey, expectedPromptCacheKey)
+	}
+	if gotMetadataTurnID := gjson.Get(gotMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
+		t.Fatalf("X-Codex-Turn-Metadata.turn_id = %q, want %q", gotMetadataTurnID, expectedTurnID)
+	}
+	if gotMetadataWindowID := gjson.Get(gotMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
+		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
+	}
+	expectedInstallationID := codexIdentityConfuseUUID("auth-ws-1", "installation", "install-ws-1")
+	if gotInstallationID := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); gotInstallationID != expectedInstallationID {
+		t.Fatalf("installation id = %q, want %q", gotInstallationID, expectedInstallationID)
+	}
+}
+
+func TestCodexIdentityConfuseResponsePayloadHidesUpstreamAndRestoresClient(t *testing.T) {
+	state := codexIdentityConfuseState{
+		enabled:                true,
+		authID:                 "auth-ws-1",
+		originalPromptCacheKey: "cache-ws-1",
+		promptCacheKey:         codexIdentityConfuseUUID("auth-ws-1", "prompt-cache", "cache-ws-1"),
+	}
+	expectedTurnID := state.confuseTurnID("turn-ws-1")
+	rawPayload := []byte(`{"type":"response.completed","response":{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"},"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"}`)
+
+	upstreamPayload := applyCodexIdentityConfuseResponsePayload(rawPayload, state)
+	if bytes.Contains(upstreamPayload, []byte(`cache-ws-1`)) {
+		t.Fatalf("upstream payload still contains original prompt_cache_key: %s", string(upstreamPayload))
+	}
+	if bytes.Contains(upstreamPayload, []byte(`turn-ws-1`)) {
+		t.Fatalf("upstream payload still contains original turn_id: %s", string(upstreamPayload))
+	}
+	if !bytes.Contains(upstreamPayload, []byte(state.promptCacheKey)) {
+		t.Fatalf("upstream payload missing confused prompt_cache_key: %s", string(upstreamPayload))
+	}
+	if !bytes.Contains(upstreamPayload, []byte(expectedTurnID)) {
+		t.Fatalf("upstream payload missing confused turn_id: %s", string(upstreamPayload))
+	}
+
+	clientPayload := applyCodexIdentityExposeResponsePayload(upstreamPayload, state)
+	if bytes.Contains(clientPayload, []byte(state.promptCacheKey)) {
+		t.Fatalf("client payload still contains confused prompt_cache_key: %s", string(clientPayload))
+	}
+	if bytes.Contains(clientPayload, []byte(expectedTurnID)) {
+		t.Fatalf("client payload still contains confused turn_id: %s", string(clientPayload))
+	}
+	if !bytes.Contains(clientPayload, []byte(`cache-ws-1`)) {
+		t.Fatalf("client payload missing original prompt_cache_key: %s", string(clientPayload))
+	}
+	if !bytes.Contains(clientPayload, []byte(`turn-ws-1`)) {
+		t.Fatalf("client payload missing original turn_id: %s", string(clientPayload))
+	}
+
+	rawSSE := []byte(`data: {"type":"response.completed","response":{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"}}`)
+	upstreamSSE := applyCodexIdentityConfuseResponsePayload(rawSSE, state)
+	if bytes.Contains(upstreamSSE, []byte(`cache-ws-1`)) {
+		t.Fatalf("upstream SSE still contains original prompt_cache_key: %s", string(upstreamSSE))
+	}
+	if bytes.Contains(upstreamSSE, []byte(`turn-ws-1`)) {
+		t.Fatalf("upstream SSE still contains original turn_id: %s", string(upstreamSSE))
+	}
+	clientSSE := applyCodexIdentityExposeResponsePayload(upstreamSSE, state)
+	if !bytes.Contains(clientSSE, []byte(`cache-ws-1`)) || bytes.Contains(clientSSE, []byte(state.promptCacheKey)) {
+		t.Fatalf("client SSE prompt_cache_key was not restored: %s", string(clientSSE))
+	}
+	if !bytes.Contains(clientSSE, []byte(`turn-ws-1`)) || bytes.Contains(clientSSE, []byte(expectedTurnID)) {
+		t.Fatalf("client SSE turn_id was not restored: %s", string(clientSSE))
 	}
 }
 
