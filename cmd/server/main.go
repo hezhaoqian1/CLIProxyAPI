@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,21 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 		return false
 	}
 	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
+func cloudDeployPort() int {
+	raw := strings.TrimSpace(os.Getenv("PORT"))
+	if raw == "" {
+		return 8317
+	}
+
+	port, err := strconv.Atoi(raw)
+	if err != nil || port <= 0 || port > 65535 {
+		log.WithField("PORT", raw).Warn("invalid PORT environment variable; falling back to 8317")
+		return 8317
+	}
+
+	return port
 }
 
 // main is the entry point of the application.
@@ -534,12 +550,24 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	if isCloudDeploy && cfg.Port <= 0 {
+		cfg.Port = cloudDeployPort()
+	}
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
 		if configLoadedFromHome && cfg != nil {
 			configFileExists = cfg.Port != 0
+		} else if cfg != nil && cfg.Port != 0 {
+			if info, errStat := os.Stat(configFilePath); errStat != nil {
+				log.Info("Cloud deploy mode: No configuration file detected; starting service with cloud defaults")
+			} else if info.IsDir() {
+				log.Info("Cloud deploy mode: Config path is a directory; starting service with cloud defaults")
+			} else {
+				log.Info("Cloud deploy mode: Configuration file detected; starting service")
+			}
+			configFileExists = true
 		} else {
 			if info, errStat := os.Stat(configFilePath); errStat != nil {
 				// Don't mislead: API server will not start until configuration is provided.
