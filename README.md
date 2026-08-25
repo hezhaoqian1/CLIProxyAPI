@@ -138,6 +138,10 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Railway
+
+Set `DEPLOY=cloud` and provide your runtime config through Railway environment variables or a `config.yaml` volume. The server now uses Railway's `PORT` value automatically and will start even when no local `config.yaml` is present.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

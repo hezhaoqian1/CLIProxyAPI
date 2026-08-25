@@ -135,3 +135,26 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestCloudDeployPort(t *testing.T) {
+	t.Run("defaults to railway fallback when unset", func(t *testing.T) {
+		t.Setenv("PORT", "")
+		if got := cloudDeployPort(); got != 8317 {
+			t.Fatalf("cloudDeployPort() = %d, want 8317", got)
+		}
+	})
+
+	t.Run("uses valid port from env", func(t *testing.T) {
+		t.Setenv("PORT", "12345")
+		if got := cloudDeployPort(); got != 12345 {
+			t.Fatalf("cloudDeployPort() = %d, want 12345", got)
+		}
+	})
+
+	t.Run("falls back on invalid port", func(t *testing.T) {
+		t.Setenv("PORT", "not-a-port")
+		if got := cloudDeployPort(); got != 8317 {
+			t.Fatalf("cloudDeployPort() = %d, want 8317", got)
+		}
+	})
+}
